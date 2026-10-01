@@ -39,6 +39,12 @@ WidgetCard {
   property bool seeking: false
   property real seekPreviewFrac: 0
   property bool hideWhenPaused: false
+  // ▶ Autoplay on Start (right-click toggle): whether the saved video starts
+  // playing when the widget loads (shell start, login). Off: it loads paused
+  // on its first frame. A video you pick or paste always plays straight away.
+  property bool autoPlayOnStart: true
+  property bool startupDone: false      // the first video load has happened
+  property bool startupRefetch: false   // a YouTube re-download made at start-up
   readonly property bool barRevealed: bottomHoverHandler.hovered || videoWidgetRoot.barPressed || (rootRef && rootRef.layoutEditMode === true)
 
   // ---------------------------------------------------------------------------
@@ -202,9 +208,12 @@ WidgetCard {
     return decodeURIComponent(u.replace(/^file:\/\//, ""))
   }
 
-  function loadYoutubeUrl(url) {
+  // atStart: the start-up re-download of a cached video that went missing
+  // (Autoplay on Start decides whether it plays), not a URL you just pasted.
+  function loadYoutubeUrl(url, atStart) {
     url = String(url || "").trim()
     if (url.length === 0 || ytProc.running) return
+    ytProc.atStart = atStart === true
     videoWidgetRoot.ytLoading = true
     videoWidgetRoot.ytProgress = 0
     videoWidgetRoot.ytLoadingTitle = ""
@@ -217,6 +226,7 @@ WidgetCard {
   Process {
     id: ytProc
     property string pendingUrl: ""
+    property bool atStart: false
     running: false
     stdout: SplitParser {
       onRead: function(line) {
@@ -230,6 +240,7 @@ WidgetCard {
           } else if (data.status === "ok" && data.path) {
             videoWidgetRoot.videoTitle = data.title || ""
             videoWidgetRoot.youtubeUrl = ytProc.pendingUrl
+            videoWidgetRoot.startupRefetch = ytProc.atStart
             videoWidgetRoot.videoPath = data.path
             videoWidgetRoot.videoFailed = false
             videoWidgetRoot.saveSettings({
@@ -268,6 +279,9 @@ WidgetCard {
   }
 
   function applySavedSettings() {
+    // before videoPath: setting the path starts the load (and the autoplay
+    // decision) straight away
+    autoPlayOnStart = getSetting("autoPlayOnStart", true)
     videoPath = getSetting("videoPath", "")
     videoTitle = getSetting("videoTitle", "")
     youtubeUrl = getSetting("youtubeUrl", "")
@@ -286,7 +300,7 @@ WidgetCard {
     command: ["test", "-f", videoWidgetRoot.videoPath]
     running: false
     onExited: function(exitCode) {
-      if (exitCode !== 0 && videoWidgetRoot.youtubeUrl.length > 0) videoWidgetRoot.loadYoutubeUrl(videoWidgetRoot.youtubeUrl)
+      if (exitCode !== 0 && videoWidgetRoot.youtubeUrl.length > 0) videoWidgetRoot.loadYoutubeUrl(videoWidgetRoot.youtubeUrl, true)
     }
   }
 
@@ -318,6 +332,11 @@ WidgetCard {
       videoWidgetRoot.muted = false
       videoWidgetRoot.saveSetting("muted", false)
     }
+  }
+
+  function toggleAutoPlayOnStart() {
+    videoWidgetRoot.autoPlayOnStart = !videoWidgetRoot.autoPlayOnStart
+    videoWidgetRoot.saveSetting("autoPlayOnStart", videoWidgetRoot.autoPlayOnStart)
   }
 
   function toggleLoop() {
@@ -370,7 +389,16 @@ WidgetCard {
     audioOutput: audioOut
     // Autoplay from here, not onVideoUrlChanged: that handler runs before
     // this `source` binding re-evaluates, so play() there hit an empty source.
-    onSourceChanged: if (String(source).length > 0) play()
+    // The first load (the saved video, at start-up) follows Autoplay on
+    // Start; pause() still loads it and shows its first frame.
+    onSourceChanged: {
+      if (String(source).length === 0) return
+      var atStart = !videoWidgetRoot.startupDone || videoWidgetRoot.startupRefetch
+      videoWidgetRoot.startupDone = true
+      videoWidgetRoot.startupRefetch = false
+      if (atStart && !videoWidgetRoot.autoPlayOnStart) pause()
+      else play()
+    }
     loops: videoWidgetRoot.loopVideo ? MediaPlayer.Infinite : 1
     onErrorOccurred: function(error, errorString) {
       videoWidgetRoot.videoFailed = true
@@ -592,6 +620,51 @@ WidgetCard {
           // Menu stays open: closing it here would also re-hide a card that
           // Hide While Paused only revealed because the menu was open.
           onClicked: videoWidgetRoot.toggleLoop()
+        }
+      }
+
+      // Autoplay on Start Toggle
+      Rectangle {
+        Layout.fillWidth: true
+        implicitHeight: 28
+        radius: 6
+        color: autoPlayMouse.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2) : "transparent"
+
+        RowLayout {
+          anchors.fill: parent
+          anchors.leftMargin: Style.space(8)
+          anchors.rightMargin: Style.space(8)
+          spacing: Style.space(8)
+
+          Text {
+            text: "\uf04b"
+            font.family: Style.font.family
+            font.pixelSize: 11
+            color: videoWidgetRoot.autoPlayOnStart ? Color.accent : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.5)
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: "Autoplay on Start"
+            font.family: Style.font.family
+            font.pixelSize: 11
+            color: Color.foreground
+          }
+
+          Text {
+            text: videoWidgetRoot.autoPlayOnStart ? "\uf14a" : "\uf0c8"
+            font.family: Style.font.family
+            font.pixelSize: 12
+            color: videoWidgetRoot.autoPlayOnStart ? Color.accent : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.4)
+          }
+        }
+
+        MouseArea {
+          id: autoPlayMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: videoWidgetRoot.toggleAutoPlayOnStart()
         }
       }
 
